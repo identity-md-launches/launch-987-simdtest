@@ -27,7 +27,8 @@ def validate(manifest: dict) -> None:
     assert manifest["kind"] == "custom_token"
     assert manifest["token"] == {
         "contract": "SIMDTESTToken", "name": "SIMDTEST", "symbol": "SIMDTEST",
-        "decimals": 18, "constructorArgs": [], "totalSupply": str(10**27),
+        "decimals": 18, "constructorArgs": ["$factory", "$poolManager", "$launchNumber"],
+        "totalSupply": str(10**27),
     }
     assert manifest["contracts"] == []
     assert manifest["economics"] == {

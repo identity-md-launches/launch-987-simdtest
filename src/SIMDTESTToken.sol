@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
+interface ILaunchFactory {
+    function distributorOf(uint64 launchNumber) external view returns (address);
+}
+
 /// @notice Fixed-supply SIMDTEST with a PoolManager-outgoing tax paid as token dividends.
-/// @dev No external calls, administrative roles, or post-construction mint/burn paths.
+/// @dev No administrative roles or post-construction mint/burn paths.
 contract SIMDTESTToken {
     string public constant name = "SIMDTEST";
     string public constant symbol = "SIMDTEST";
@@ -15,6 +19,9 @@ contract SIMDTESTToken {
     uint256 public constant MAGNITUDE = 1 << 128;
     address public constant POOL_MANAGER = 0x000000000004444c5dc75cB358380D2e3dE08A90;
     address public constant BURN_ADDRESS = 0x000000000000000000000000000000000000dEaD;
+    address public immutable FACTORY;
+    uint64 public immutable LAUNCH_NUMBER;
+    address private _dividendDistributor;
 
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
@@ -37,8 +44,17 @@ contract SIMDTESTToken {
     error InvalidSpender();
     error InsufficientBalance();
     error InsufficientAllowance();
+    error InvalidFactory();
+    error InvalidPoolManager();
 
-    constructor() {
+    constructor(address factory_, address poolManager_, uint64 launchNumber_) {
+        if (
+            factory_ != msg.sender || factory_.code.length == 0 || factory_ == POOL_MANAGER
+                || factory_ == BURN_ADDRESS
+        ) revert InvalidFactory();
+        if (poolManager_ != POOL_MANAGER) revert InvalidPoolManager();
+        FACTORY = factory_;
+        LAUNCH_NUMBER = launchNumber_;
         balanceOf[msg.sender] = totalSupply;
         emit Transfer(address(0), msg.sender, totalSupply);
     }
@@ -67,12 +83,22 @@ contract SIMDTESTToken {
     }
 
     function isDividendExcluded(address account) public view returns (bool) {
-        return account == POOL_MANAGER || account == address(this) || account == BURN_ADDRESS
-            || account == address(0);
+        return _isFixedDividendExcluded(account) || account == dividendDistributor();
+    }
+
+    /// @notice Resolve after deployment: the distributor's address depends on the token's address.
+    function dividendDistributor() public view returns (address) {
+        if (_dividendDistributor != address(0)) return _dividendDistributor;
+        return ILaunchFactory(FACTORY).distributorOf(LAUNCH_NUMBER);
     }
 
     function eligibleSupply() public view returns (uint256) {
-        return totalSupply - balanceOf[POOL_MANAGER] - balanceOf[address(this)] - balanceOf[BURN_ADDRESS];
+        uint256 eligible = totalSupply - balanceOf[POOL_MANAGER] - balanceOf[address(this)]
+            - balanceOf[BURN_ADDRESS] - balanceOf[FACTORY];
+        address distributor = dividendDistributor();
+        // Count each excluded balance once, including while the registry still returns zero.
+        if (!_isFixedDividendExcluded(distributor)) eligible -= balanceOf[distributor];
+        return eligible;
     }
 
     /// @notice Previously earned dividends remain claimable even after selling the entire balance.
@@ -103,14 +129,23 @@ contract SIMDTESTToken {
         if (to == address(0)) revert InvalidReceiver();
         if (balanceOf[from] < amount) revert InsufficientBalance();
 
+        // Bind the first registered distributor permanently; no setter or later registry override.
+        if (_dividendDistributor == address(0)) _dividendDistributor = dividendDistributor();
+
         // Destination takes precedence: ALL transfers into the manager settle at face value.
         uint256 fee = from == POOL_MANAGER && to != POOL_MANAGER ? amount * BUY_FEE_BPS / BPS : 0;
-        if (fee != 0) _move(from, address(this), fee);
-        _move(from, to, amount - fee);
         if (fee != 0) {
+            _move(from, address(this), fee);
             totalFeesCollected += fee;
             _distribute(fee);
         }
+        // Accrue the recipient's pre-buy balance at the new index before crediting the net buy.
+        _move(from, to, amount - fee);
+    }
+
+    function _isFixedDividendExcluded(address account) private view returns (bool) {
+        return account == POOL_MANAGER || account == address(this) || account == BURN_ADDRESS
+            || account == address(0) || account == FACTORY;
     }
 
     function _move(address from, address to, uint256 amount) private {
@@ -135,7 +170,7 @@ contract SIMDTESTToken {
             return;
         }
         queuedDividends = 0;
-        // Snapshot AFTER the net purchase: the buyer participates with its net balance.
+        // Snapshot BEFORE the net purchase: new tokens cannot rebate their own buy fee.
         // Global division dust stays reserved, never redistributed or withdrawable by an admin.
         magnifiedDividendPerShare += amount * MAGNITUDE / eligible;
         emit DividendsDistributed(amount, eligible);

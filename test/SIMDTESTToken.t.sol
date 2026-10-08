@@ -13,8 +13,12 @@ contract SIMDTESTTokenTest is TestBase {
     address internal constant DISTRIBUTOR = address(0xD157);
     uint256 internal constant SUPPLY = 1_000_000_000 ether;
 
+    function distributorOf(uint64) external pure returns (address) {
+        return DISTRIBUTOR;
+    }
+
     function setUp() public {
-        token = new SIMDTESTToken();
+        token = new SIMDTESTToken(address(this), MANAGER, 1);
     }
 
     function test_ConstructorMintsEverythingOnlyToDeployer() public view {
@@ -40,7 +44,7 @@ contract SIMDTESTTokenTest is TestBase {
         assertEq(token.totalSupply(), SUPPLY);
     }
 
-    function test_BuyTaxesThreePercentAndAccruesProRataAfterPurchase() public {
+    function test_BuyTaxesThreePercentAndAccruesProRataBeforePurchase() public {
         token.transfer(ALICE, 600 ether);
         token.transfer(BOB, 300 ether);
         token.transfer(MANAGER, SUPPLY - 900 ether);
@@ -50,9 +54,9 @@ contract SIMDTESTTokenTest is TestBase {
         assertEq(token.balanceOf(MANAGER), SUPPLY - 1000 ether);
         assertEq(token.eligibleSupply(), 997 ether);
         assertEq(token.totalFeesCollected(), 3 ether);
-        assertApprox(token.withdrawableDividendOf(ALICE), uint256(3 ether) * 600 / 997, 1);
-        assertApprox(token.withdrawableDividendOf(BOB), uint256(3 ether) * 300 / 997, 1);
-        assertApprox(token.withdrawableDividendOf(CAROL), uint256(3 ether) * 97 / 997, 1);
+        assertApprox(token.withdrawableDividendOf(ALICE), 2 ether, 1);
+        assertApprox(token.withdrawableDividendOf(BOB), 1 ether, 1);
+        assertEq(token.withdrawableDividendOf(CAROL), 0);
     }
 
     function test_SellsAndWalletTransfersAreUntaxed() public {
@@ -68,13 +72,14 @@ contract SIMDTESTTokenTest is TestBase {
     }
 
     function test_ClaimPaysOnceAndDoesNotMint() public {
-        token.transfer(MANAGER, SUPPLY);
-        _buy(ALICE, 1000 ether);
+        token.transfer(ALICE, 1000 ether);
+        token.transfer(MANAGER, SUPPLY - 1000 ether);
+        _buy(BOB, 1000 ether);
         uint256 owed = token.withdrawableDividendOf(ALICE);
         assertApprox(owed, 30 ether, 1);
         vm.prank(ALICE);
         assertEq(token.claim(), owed);
-        assertEq(token.balanceOf(ALICE), 970 ether + owed);
+        assertEq(token.balanceOf(ALICE), 1000 ether + owed);
         assertEq(token.balanceOf(address(token)), 30 ether - owed);
         assertEq(token.withdrawnDividends(ALICE), owed);
         assertEq(token.totalDividendsClaimed(), owed);
@@ -84,8 +89,9 @@ contract SIMDTESTTokenTest is TestBase {
     }
 
     function test_TransferCannotMoveOrDuplicateEarnedDividends() public {
-        token.transfer(MANAGER, SUPPLY);
-        _buy(ALICE, 1000 ether);
+        token.transfer(ALICE, 1000 ether);
+        token.transfer(MANAGER, SUPPLY - 1000 ether);
+        _buy(CAROL, 1000 ether);
         uint256 earned = token.withdrawableDividendOf(ALICE);
         uint256 held = token.balanceOf(ALICE);
         vm.prank(ALICE);
@@ -94,15 +100,16 @@ contract SIMDTESTTokenTest is TestBase {
         assertEq(token.withdrawableDividendOf(BOB), 0);
         _buy(CAROL, 1000 ether);
         assertEq(token.withdrawableDividendOf(ALICE), earned);
-        assertApprox(token.withdrawableDividendOf(BOB), 15 ether, 1);
-        assertApprox(token.withdrawableDividendOf(CAROL), 15 ether, 1);
+        assertApprox(token.withdrawableDividendOf(BOB), uint256(30 ether) * 1000 / 1970, 1);
+        assertApprox(token.withdrawableDividendOf(CAROL), uint256(30 ether) * 970 / 1970, 1);
         vm.prank(ALICE);
         assertEq(token.claim(), earned);
     }
 
     function test_SellerKeepsPastDividendsAndStopsEarningOnSoldTokens() public {
-        token.transfer(MANAGER, SUPPLY);
-        _buy(ALICE, 1000 ether);
+        token.transfer(ALICE, 1000 ether);
+        token.transfer(MANAGER, SUPPLY - 1000 ether);
+        _buy(BOB, 1000 ether);
         uint256 earned = token.withdrawableDividendOf(ALICE);
         uint256 held = token.balanceOf(ALICE);
         vm.prank(ALICE);
@@ -113,15 +120,17 @@ contract SIMDTESTTokenTest is TestBase {
     }
 
     function test_ClaimedTokensOnlyEarnFutureDividends() public {
-        token.transfer(MANAGER, SUPPLY);
-        _buy(ALICE, 1000 ether);
+        token.transfer(ALICE, 1000 ether);
+        token.transfer(MANAGER, SUPPLY - 1000 ether);
+        _buy(BOB, 1000 ether);
         vm.prank(ALICE);
         token.claim();
         uint256 aliceBalance = token.balanceOf(ALICE);
-        _buy(BOB, 1000 ether);
+        _buy(CAROL, 1000 ether);
         uint256 expected = 30 ether * aliceBalance / (aliceBalance + 970 ether);
         assertApprox(token.withdrawableDividendOf(ALICE), expected, 1);
         assertApprox(token.withdrawableDividendOf(BOB), 30 ether * 970 ether / (aliceBalance + 970 ether), 1);
+        assertEq(token.withdrawableDividendOf(CAROL), 0);
     }
 
     function test_ExcludedBalancesAndDonationsDoNotEarn() public {
@@ -131,8 +140,12 @@ contract SIMDTESTTokenTest is TestBase {
         _buy(ALICE, 1000 ether);
         assertEq(token.eligibleSupply(), 970 ether);
         assertEq(token.balanceOf(address(token)), 130 ether);
-        assertApprox(token.withdrawableDividendOf(ALICE), 30 ether, 1);
-        address[4] memory excluded = [MANAGER, address(token), token.BURN_ADDRESS(), address(0)];
+        assertEq(token.withdrawableDividendOf(ALICE), 0);
+        assertEq(token.queuedDividends(), 30 ether);
+        _buy(BOB, 1000 ether);
+        assertApprox(token.withdrawableDividendOf(ALICE), 60 ether, 1);
+        address[6] memory excluded =
+            [MANAGER, address(token), token.BURN_ADDRESS(), address(0), address(this), DISTRIBUTOR];
         for (uint256 i; i < excluded.length; ++i) {
             assertEq(token.withdrawableDividendOf(excluded[i]), 0);
             vm.prank(excluded[i]);
@@ -146,22 +159,29 @@ contract SIMDTESTTokenTest is TestBase {
         assertEq(token.eligibleSupply(), 0);
         assertEq(token.queuedDividends(), 30 ether);
         _buy(ALICE, 1000 ether);
+        assertEq(token.queuedDividends(), 60 ether);
+        assertEq(token.withdrawableDividendOf(ALICE), 0);
+        vm.prank(ALICE);
+        assertEq(token.claim(), 0);
+        _buy(BOB, 1000 ether);
         assertEq(token.queuedDividends(), 0);
-        assertApprox(token.withdrawableDividendOf(ALICE), 60 ether, 1);
-        assertEq(token.balanceOf(address(token)), 60 ether);
+        assertApprox(token.withdrawableDividendOf(ALICE), 90 ether, 1);
+        assertEq(token.withdrawableDividendOf(BOB), 0);
+        assertEq(token.balanceOf(address(token)), 90 ether);
     }
 
     function test_ZeroAndSelfTransfersDoNotChangeEntitlements() public {
-        token.transfer(MANAGER, SUPPLY);
-        _buy(ALICE, 1000 ether);
+        token.transfer(ALICE, 1000 ether);
+        token.transfer(MANAGER, SUPPLY - 1000 ether);
+        _buy(BOB, 1000 ether);
         uint256 earned = token.withdrawableDividendOf(ALICE);
         vm.startPrank(ALICE);
-        token.transfer(ALICE, 970 ether);
+        token.transfer(ALICE, 1000 ether);
         token.transfer(BOB, 0);
         vm.stopPrank();
         vm.prank(MANAGER);
         token.transfer(MANAGER, 100 ether);
-        assertEq(token.balanceOf(ALICE), 970 ether);
+        assertEq(token.balanceOf(ALICE), 1000 ether);
         assertEq(token.withdrawableDividendOf(ALICE), earned);
         assertEq(token.totalFeesCollected(), 30 ether);
     }
@@ -264,8 +284,8 @@ contract SIMDTESTTokenTest is TestBase {
         assertEq(token.balanceOf(address(token)), fee);
         vm.prank(ALICE);
         uint256 claimed = token.claim();
-        assertLe(claimed, fee);
-        assertApprox(claimed, fee, 1);
+        assertEq(claimed, 0);
+        assertEq(token.queuedDividends(), fee);
         assertEq(token.balanceOf(ALICE) + token.balanceOf(MANAGER) + token.balanceOf(address(token)), SUPPLY);
     }
 
@@ -281,18 +301,21 @@ contract SIMDTESTTokenTest is TestBase {
             _buy(BOB, 101);
         }
         uint256 expected = firstBalance * token.magnifiedDividendPerShare() / token.MAGNITUDE();
-        assertGt(firstIndex, 0);
+        assertEq(firstIndex, 0);
+        assertGt(token.magnifiedDividendPerShare(), 0);
         assertEq(token.withdrawableDividendOf(ALICE), expected);
     }
 
     function testFuzz_StatefulConservationAndDividendSolvency(uint256 seed) public {
-        address[7] memory accounts =
-            [address(this), ALICE, BOB, CAROL, MANAGER, address(token), token.BURN_ADDRESS()];
+        address[8] memory accounts =
+            [address(this), ALICE, BOB, CAROL, MANAGER, address(token), token.BURN_ADDRESS(), DISTRIBUTOR];
         token.transfer(MANAGER, SUPPLY / 2);
         token.transfer(ALICE, SUPPLY / 10);
         for (uint256 i; i < 80; ++i) {
             seed = uint256(keccak256(abi.encode(seed, i)));
-            address from = accounts[seed % 5];
+            address from = accounts[seed % accounts.length];
+            // The token reserve has no transfer entrypoint for spending its own balance.
+            if (from == address(token)) from = DISTRIBUTOR;
             address to = accounts[(seed >> 16) % accounts.length];
             if (seed % 4 == 0) {
                 vm.prank(from);
@@ -318,7 +341,8 @@ contract SIMDTESTTokenTest is TestBase {
             assertEq(
                 token.eligibleSupply(),
                 SUPPLY - token.balanceOf(MANAGER) - token.balanceOf(address(token))
-                    - token.balanceOf(token.BURN_ADDRESS())
+                    - token.balanceOf(token.BURN_ADDRESS()) - token.balanceOf(address(this))
+                    - token.balanceOf(DISTRIBUTOR)
             );
         }
     }

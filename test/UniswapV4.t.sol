@@ -68,6 +68,10 @@ abstract contract UniswapV4TestBase is TestBase, IUnlockCallback {
 
     function tokenFirst() internal pure virtual returns (bool);
 
+    function distributorOf(uint64) external pure returns (address) {
+        return DISTRIBUTOR;
+    }
+
     function setUp() public {
         if (MANAGER.code.length == 0) {
             vm.chainId(1);
@@ -129,7 +133,9 @@ abstract contract UniswapV4TestBase is TestBase, IUnlockCallback {
         assertEq(token.balanceOf(TRADER), gross - fee);
         assertEq(token.balanceOf(address(token)), fee);
         assertEq(token.balanceOf(MANAGER), seedSpent - gross);
-        assertGt(token.withdrawableDividendOf(DISTRIBUTOR), 0);
+        assertEq(token.withdrawableDividendOf(DISTRIBUTOR), 0);
+        assertEq(token.withdrawableDividendOf(TRADER), 0);
+        assertEq(token.queuedDividends(), fee);
         _assertSettled();
 
         uint256 net = token.balanceOf(TRADER);
@@ -149,6 +155,59 @@ abstract contract UniswapV4TestBase is TestBase, IUnlockCallback {
         _swap(!tokenFirst(), 100 ether, false);
         assertEq(token.balanceOf(TRADER), 97 ether);
         assertEq(token.balanceOf(address(token)), 3 ether);
+        _assertSettled();
+    }
+
+    function test_ClaimTokenRoundTripDoesNotTransferOrTax() public {
+        BalanceDelta bought = abi.decode(
+            manager.unlock(abi.encode(uint8(2), !tokenFirst(), -int256(0.5 ether), false)), (BalanceDelta)
+        );
+        uint256 gross = uint256(uint128(tokenFirst() ? bought.amount0() : bought.amount1()));
+        uint256 id = uint256(uint160(address(token)));
+        assertGt(gross, 0);
+        assertEq(manager.balanceOf(TRADER, id), gross);
+        assertEq(token.balanceOf(TRADER), 0);
+        assertEq(token.totalFeesCollected(), 0);
+        _assertSettled();
+        vm.prank(TRADER);
+        manager.setOperator(address(this), true);
+        manager.unlock(abi.encode(uint8(2), tokenFirst(), -int256(gross), false));
+        assertEq(manager.balanceOf(TRADER, id), 0);
+        assertEq(token.balanceOf(TRADER), 0);
+        assertEq(token.totalFeesCollected(), 0);
+        _assertSettled();
+
+        // Control: the same buy delivered through take() does trigger the specified transfer tax.
+        bought = _swap(!tokenFirst(), -0.5 ether, false);
+        gross = uint256(uint128(tokenFirst() ? bought.amount0() : bought.amount1()));
+        assertEq(token.totalFeesCollected(), gross * 3 / 100);
+        assertEq(token.balanceOf(TRADER), gross - gross * 3 / 100);
+        _assertSettled();
+    }
+
+    function test_LiquidityRemovalTaxesTheOutgoingTransfer() public {
+        _swap(!tokenFirst(), -0.5 ether, false);
+        uint256 feesBefore = token.totalFeesCollected();
+        uint256 before = token.balanceOf(TRADER);
+        vm.prank(TRADER);
+        token.approve(address(this), before);
+        manager.unlock(abi.encode(uint8(3), false, int256(uint256(liquidity / 20_000)), false));
+        uint256 deposited = before - token.balanceOf(TRADER);
+        assertGt(deposited, 0);
+        assertEq(token.totalFeesCollected(), feesBefore);
+        _assertSettled();
+
+        before = token.balanceOf(TRADER);
+        BalanceDelta removed = abi.decode(
+            manager.unlock(abi.encode(uint8(3), false, -int256(uint256(liquidity / 20_000)), false)),
+            (BalanceDelta)
+        );
+        uint256 gross = uint256(uint128(tokenFirst() ? removed.amount0() : removed.amount1()));
+        uint256 fee = gross * 3 / 100;
+        assertApprox(gross, deposited, 1);
+        assertGt(fee, 0);
+        assertEq(token.totalFeesCollected() - feesBefore, fee);
+        assertEq(token.balanceOf(TRADER) - before, gross - fee);
         _assertSettled();
     }
 
@@ -180,17 +239,27 @@ abstract contract UniswapV4TestBase is TestBase, IUnlockCallback {
             (delta,) = manager.modifyLiquidity(
                 key, ModifyLiquidityParams(lower, upper, int256(uint256(liquidity)), 0), ""
             );
+        } else if (operation == 3) {
+            (delta,) = manager.modifyLiquidity(
+                key, ModifyLiquidityParams(lower, upper, specified, bytes32(uint256(1))), ""
+            );
         } else {
             uint160 limit = zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1;
             delta = manager.swap(key, SwapParams(zeroForOne, specified, limit), "");
         }
         address payer = operation == 0 ? address(this) : TRADER;
-        _settle(key.currency0, delta.amount0(), payer, underpay);
-        _settle(key.currency1, delta.amount1(), payer, underpay);
+        _settle(key.currency0, delta.amount0(), payer, underpay, operation == 2);
+        _settle(key.currency1, delta.amount1(), payer, underpay, operation == 2);
         return abi.encode(delta);
     }
 
-    function _settle(Currency currency, int128 delta, address payer, bool underpay) private {
+    function _settle(Currency currency, int128 delta, address payer, bool underpay, bool useClaims) private {
+        if (useClaims && Currency.unwrap(currency) == address(token)) {
+            uint256 id = uint256(uint160(address(token)));
+            if (delta < 0) manager.burn(TRADER, id, uint256(-int256(delta)));
+            else if (delta > 0) manager.mint(TRADER, id, uint128(delta));
+            return;
+        }
         if (delta < 0) {
             uint256 owed = uint256(-int256(delta));
             if (underpay && Currency.unwrap(currency) == address(token)) --owed;
@@ -217,14 +286,16 @@ abstract contract UniswapV4TestBase is TestBase, IUnlockCallback {
     }
 
     function _deployInOrder() private {
-        bytes32 initHash = keccak256(type(SIMDTESTToken).creationCode);
+        bytes32 initHash = keccak256(
+            abi.encodePacked(type(SIMDTESTToken).creationCode, abi.encode(address(this), MANAGER, uint64(1)))
+        );
         for (uint256 i; i < 1000; ++i) {
             bytes32 salt = bytes32(i);
             address predicted = address(
                 uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, initHash))))
             );
             if ((predicted < IMD) == tokenFirst()) {
-                token = new SIMDTESTToken{salt: salt}();
+                token = new SIMDTESTToken{salt: salt}(address(this), MANAGER, 1);
                 return;
             }
         }
