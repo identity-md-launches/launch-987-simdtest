@@ -1,0 +1,24 @@
+{
+  "kind": "custom_token",
+  "token": {
+    "contract": "SIMDTESTToken",
+    "name": "SIMDTEST",
+    "symbol": "SIMDTEST",
+    "decimals": 18,
+    "constructorArgs": [],
+    "totalSupply": "1000000000000000000000000000"
+  },
+  "contracts": [],
+  "pool": {
+    "pairedCurrency": "0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7",
+    "fee": 3000,
+    "tickSpacing": 60,
+    "initialPrice": "125270724187523965593206900"
+  },
+  "economics": {
+    "poolBps": 9000,
+    "initialMarketCapWei": "2500000000000000000000",
+    "remainderTo": "0x000000000000000000000000000000000000dead"
+  },
+  "notes": "Ethereum mainnet (chainId 1). No constructor arguments or application contracts. The constructor mints the entire fixed supply to the calling launch factory; the factory distributes 10% through its Merkle distributor, seeds up to 90% single-sided through PoolManager 0x000000000004444c5dc75cB358380D2e3dE08A90 and forwards rounding remainder to the specified burn address. The mandatory pool fee 3000 (0.30%) and tickSpacing 60 override the earlier 1.25% prose. A separate immutable 3% token tax applies to transfers from PoolManager except transfers back to PoolManager. Dividends use eligible balances after each net buy. initialPrice is provenance for sorted currencies when SIMDTEST is currency0: floor(sqrt(2500e18 / 1e27) * 2^96). If the actual deployment sorts SIMDTEST as currency1, the corresponding value is 50108289675009586237282760313921. No deployment address is assumed; the launch factory derives the authoritative sorted opening price. tools/launch_price.py calculates the appropriate orientation given the actual token address. External SIMD creator-fee splitting remains the launch operator's responsibility."
+}
